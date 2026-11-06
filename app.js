@@ -41,6 +41,8 @@
       exists: 'هذا الكود موجود مسبقاً ✓',
       busy: 'الخادم مشغول، حاول بعد دقيقة.',
       sending: 'جارٍ الإضافة…',
+      retrying: 'الخادم مشغول، جارٍ إعادة المحاولة تلقائياً…',
+      queued: 'تم حفظ كودك وسيُرسل تلقائياً خلال دقائق ✓',
       noFeatured: 'لا يوجد',
       uses: 'استخدام',
       opened: 'تم فتحه',
@@ -79,6 +81,8 @@
       exists: 'This code is already listed ✓',
       busy: 'Server is busy, try again in a minute.',
       sending: 'Adding…',
+      retrying: 'Server busy, retrying automatically…',
+      queued: 'Your code is saved and will be sent automatically in a few minutes ✓',
       noFeatured: 'None',
       uses: 'uses',
       opened: 'Opened',
@@ -147,17 +151,87 @@
     try { localStorage.setItem('usedCodes', JSON.stringify(usedSet)); } catch (e) {}
   }
 
+  // ---------- network with retry ----------
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  function post(body, opts) {
+    return fetch(CFG.API_URL, {
+      method: 'POST',
+      keepalive: !!(opts && opts.keepalive),
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(body)
+    }).then(function (r) { return r.json(); });
+  }
+
+  // Retries "busy" / network / Google quota errors with growing delays + jitter
+  function postRetry(body, tries, onRetry) {
+    var attempt = 0;
+    function go() {
+      return post(body).then(function (d) {
+        if (d && (d.ok || d.error === 'invalid')) return d;
+        throw d || {};
+      }).catch(function (err) {
+        attempt++;
+        if (attempt >= tries) throw err;
+        if (onRetry) onRetry(attempt);
+        return sleep(Math.min(1000 * Math.pow(2, attempt - 1), 8000) + Math.random() * 800).then(go);
+      });
+    }
+    return go();
+  }
+
+  // ---------- pending adds (survive page reloads) ----------
+  function lsGet(k, def) { try { return JSON.parse(localStorage.getItem(k)) || def; } catch (e) { return def; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+
+  function flushPending() {
+    if (!CFG.API_URL) return;
+    var pending = lsGet('pendingAdds', []);
+    if (!pending.length) return;
+    var code = pending[0];
+    postRetry({ action: 'add', code: code }, 3).then(function () {
+      lsSet('pendingAdds', lsGet('pendingAdds', []).filter(function (c) { return c !== code; }));
+      flushPending();
+    }, function () { /* try again on next refresh */ });
+  }
+
+  // ---------- batched click tracking ----------
+  var clickQueue = lsGet('clickQueue', []);
+  var clickTimer = null;
+
   function trackClick(code) {
     markUsed(code);
     if (!CFG.API_URL) return;
-    try {
-      fetch(CFG.API_URL, {
-        method: 'POST', keepalive: true,
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({ action: 'click', code: code })
-      }).catch(function () {});
-    } catch (e) {}
+    clickQueue.push(code);
+    lsSet('clickQueue', clickQueue);
+    if (!clickTimer) clickTimer = setTimeout(flushClicks, 20000);
   }
+
+  function flushClicks(keepalive) {
+    clearTimeout(clickTimer); clickTimer = null;
+    if (!CFG.API_URL || !clickQueue.length) return;
+    var batch = clickQueue.slice(0, 50);
+    if (keepalive === true) {
+      // Page is closing: send and forget, so counts are not sent twice next visit
+      clickQueue = clickQueue.slice(batch.length);
+      lsSet('clickQueue', clickQueue);
+      post({ action: 'clicks', codes: batch }, { keepalive: true }).catch(function () {});
+      return;
+    }
+    post({ action: 'clicks', codes: batch }).then(function (d) {
+      if (d && (d.ok || d.error === 'unknown_action')) {
+        clickQueue = clickQueue.slice(batch.length);
+        lsSet('clickQueue', clickQueue);
+        if (clickQueue.length) clickTimer = setTimeout(flushClicks, 3000);
+      } else {
+        clickTimer = setTimeout(flushClicks, 30000);
+      }
+    }, function () { clickTimer = setTimeout(flushClicks, 30000); });
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') flushClicks(true);
+  });
 
   function setupPinned(prefix, code) {
     var open = $(prefix + 'Open'), cp = $(prefix + 'Copy');
@@ -178,23 +252,40 @@
   // ---------- data ----------
   var state = { codes: [], featured: null, loaded: false, error: null, shown: PAGE_SIZE, shuffleSeed: Math.random() };
 
+  function fetchList(tries) {
+    return fetch(CFG.API_URL + '?action=list&t=' + Date.now())
+      .then(function (r) { return r.json(); })
+      .then(function (d) { if (!d || !d.ok) throw new Error('bad'); return d; })
+      .catch(function (err) {
+        if (tries <= 1) throw err;
+        return sleep(1500 + Math.random() * 1500).then(function () { return fetchList(tries - 1); });
+      });
+  }
+
   function load() {
     if (!CFG.API_URL) {
       state.loaded = true; state.error = 'notConfigured';
       renderList();
       return;
     }
-    fetch(CFG.API_URL + '?action=list&t=' + Date.now())
-      .then(function (r) { return r.json(); })
+    flushPending();
+    fetchList(3)
       .then(function (d) {
-        if (!d || !d.ok) throw new Error('bad');
         state.codes = d.codes || [];
+        // Keep codes still waiting to be sent visible to their owner
+        lsGet('pendingAdds', []).forEach(function (p) {
+          var lc = p.toLowerCase();
+          if (!state.codes.some(function (c) { return c.code.toLowerCase() === lc; })) {
+            state.codes.push({ code: p, added: Date.now(), clicks: 0 });
+          }
+        });
         state.featured = d.featured || null;
         state.loaded = true; state.error = null;
         setupPinned('featured', state.featured);
         renderList();
       })
       .catch(function () {
+        if (state.loaded && !state.error) return; // keep showing the last good list
         state.loaded = true; state.error = 'loadErr';
         renderList();
       });
@@ -301,24 +392,21 @@
     renderList();
     setMsg(t('added'), 'ok');
 
-    fetch(CFG.API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'add', code: code })
-    })
-      .then(function (r) { return r.json(); })
+    postRetry({ action: 'add', code: code }, 5, function () { setMsg(t('retrying')); })
       .then(function (d) {
-        if (d && d.ok) return;
-        rollback(d && d.error === 'invalid' ? 'invalid' : 'busy');
-      })
-      .catch(function () { rollback('busy'); });
-
-    function rollback(errKey) {
-      state.codes = state.codes.filter(function (c) { return c !== entry; });
-      renderList();
-      $('codeInput').value = code;
-      setMsg(t(errKey), 'err');
-    }
+        if (d.ok) { setMsg(t('added'), 'ok'); return; }
+        // invalid (server-side)
+        state.codes = state.codes.filter(function (c) { return c !== entry; });
+        renderList();
+        $('codeInput').value = code;
+        setMsg(t('invalid'), 'err');
+      }, function () {
+        // Still failing after retries: keep it locally and send it later automatically
+        var pending = lsGet('pendingAdds', []);
+        if (pending.indexOf(code) === -1) pending.push(code);
+        lsSet('pendingAdds', pending);
+        setMsg(t('queued'), 'ok');
+      });
   });
 
   // ---------- countdown for featured rotation ----------
@@ -351,5 +439,6 @@
   tick();
   setInterval(tick, 1000);
   load();
+  if (clickQueue.length) clickTimer = setTimeout(flushClicks, 5000);
   setInterval(load, 5 * 60 * 1000); // refresh list every 5 min
 })();
