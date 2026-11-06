@@ -1,0 +1,23 @@
+# Pings the Supabase database every 3 days so the free project never
+# reaches 7 days of inactivity (which would pause it).
+name: Keep Supabase awake
+
+on:
+  schedule:
+    - cron: '17 6 */3 * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ping database
+        run: |
+          URL=$(node -e "global.window={};eval(require('fs').readFileSync('config.js','utf8'));process.stdout.write(window.NUSUK_CONFIG.SUPABASE_URL.replace(/\/+$/,''))")
+          KEY=$(node -e "global.window={};eval(require('fs').readFileSync('config.js','utf8'));process.stdout.write(window.NUSUK_CONFIG.SUPABASE_KEY)")
+          AUTH=()
+          case "$KEY" in eyJ*) AUTH=(-H "Authorization: Bearer $KEY");; esac
+          curl -fsS -X POST "$URL/rest/v1/rpc/get_codes" \
+            -H "apikey: $KEY" "${AUTH[@]}" -H "Content-Type: application/json" \
+            -d '{"p_limit":1}' | head -c 300

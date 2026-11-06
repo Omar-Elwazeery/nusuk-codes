@@ -35,7 +35,7 @@
       empty: 'لا توجد أكواد بعد. كن أول من يضيف كوده!',
       noMatch: 'لا توجد نتائج.',
       loadErr: 'تعذّر تحميل الأكواد. حاول مرة أخرى لاحقاً.',
-      notConfigured: 'لم يتم ربط قاعدة البيانات بعد (API_URL في config.js).',
+      notConfigured: 'لم يتم ربط قاعدة البيانات بعد (SUPABASE_URL في config.js).',
       invalid: 'الكود غير صحيح. يجب أن يبدأ بـ NG- مثل NG-Glutro42',
       added: 'تمت إضافة كودك بنجاح 🎉',
       exists: 'هذا الكود موجود مسبقاً ✓',
@@ -83,7 +83,7 @@
       empty: 'No codes yet. Be the first to add yours!',
       noMatch: 'No results.',
       loadErr: 'Could not load codes. Please try again later.',
-      notConfigured: 'Database not connected yet (API_URL in config.js).',
+      notConfigured: 'Database not connected yet (SUPABASE_URL in config.js).',
       invalid: 'Invalid code. It must start with NG- like NG-Glutro42',
       added: 'Your code was added 🎉',
       exists: 'This code is already listed ✓',
@@ -170,13 +170,29 @@
   // ---------- network with retry ----------
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
-  function post(body, opts) {
-    return fetch(CFG.API_URL, {
+  var CONFIGURED = !!(CFG.SUPABASE_URL && CFG.SUPABASE_KEY);
+
+  // Calls a Supabase Postgres function (RPC). Throws on HTTP/network errors so callers can retry.
+  function rpc(fn, args, opts) {
+    var headers = { 'Content-Type': 'application/json', 'apikey': CFG.SUPABASE_KEY };
+    if (/^eyJ/.test(CFG.SUPABASE_KEY)) headers.Authorization = 'Bearer ' + CFG.SUPABASE_KEY; // legacy anon key
+    return fetch(CFG.SUPABASE_URL.replace(/\/+$/, '') + '/rest/v1/rpc/' + fn, {
       method: 'POST',
       keepalive: !!(opts && opts.keepalive),
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(body)
-    }).then(function (r) { return r.json(); });
+      headers: headers,
+      body: JSON.stringify(args || {})
+    }).then(function (r) {
+      if (!r.ok) throw new Error('http_' + r.status);
+      return r.json();
+    });
+  }
+
+  // Maps the site's actions to database functions
+  function post(body, opts) {
+    if (body.action === 'add') return rpc('add_codes', { p_codes: [body.code] }, opts);
+    if (body.action === 'addMany') return rpc('add_codes', { p_codes: body.codes }, opts);
+    if (body.action === 'clicks') return rpc('track_clicks', { p_codes: body.codes }, opts);
+    return Promise.reject(new Error('unknown_action'));
   }
 
   // Retries "busy" / network / Google quota errors with growing delays + jitter
@@ -201,7 +217,7 @@
   function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
 
   function flushPending() {
-    if (!CFG.API_URL) return;
+    if (!CONFIGURED) return;
     var pending = lsGet('pendingAdds', []);
     if (!pending.length) return;
     var code = pending[0];
@@ -217,7 +233,7 @@
 
   function trackClick(code) {
     markUsed(code);
-    if (!CFG.API_URL) return;
+    if (!CONFIGURED) return;
     clickQueue.push(code);
     lsSet('clickQueue', clickQueue);
     if (!clickTimer) clickTimer = setTimeout(flushClicks, 20000);
@@ -225,7 +241,7 @@
 
   function flushClicks(keepalive) {
     clearTimeout(clickTimer); clickTimer = null;
-    if (!CFG.API_URL || !clickQueue.length) return;
+    if (!CONFIGURED || !clickQueue.length) return;
     var batch = clickQueue.slice(0, 50);
     if (keepalive === true) {
       // Page is closing: send and forget, so counts are not sent twice next visit
@@ -265,73 +281,90 @@
     cp.onclick = function () { if (code) copy(code); };
   }
 
-  // ---------- data ----------
-  var state = { codes: [], featured: null, loaded: false, error: null, shown: PAGE_SIZE, shuffleSeed: Math.random() };
+  // ---------- data (paged from the server) ----------
+  var state = { codes: [], total: 0, all: 0, featured: null, loaded: false, error: null, loading: false, served: 0, serverTotal: 0, seed: String(Math.random()), reqId: 0 };
 
-  function fetchList(tries) {
-    return fetch(CFG.API_URL + '?action=list&t=' + Date.now())
-      .then(function (r) { return r.json(); })
-      .then(function (d) { if (!d || !d.ok) throw new Error('bad'); return d; })
-      .catch(function (err) {
-        if (tries <= 1) throw err;
-        return sleep(1500 + Math.random() * 1500).then(function () { return fetchList(tries - 1); });
-      });
+  function fetchPage(offset, tries) {
+    return rpc('get_codes', {
+      p_sort: $('sort').value,
+      p_q: $('search').value.trim(),
+      p_limit: PAGE_SIZE,
+      p_offset: offset,
+      p_seed: state.seed,
+      p_exclude: CFG.OWNER_CODE
+    }).then(function (d) {
+      if (!d || !d.ok) throw new Error('bad');
+      return d;
+    }).catch(function (err) {
+      if (tries <= 1) throw err;
+      return sleep(1000 + Math.random() * 1500).then(function () { return fetchPage(offset, tries - 1); });
+    });
   }
 
-  function load() {
-    if (!CFG.API_URL) {
+  // reset=true reloads from the first page; otherwise appends the next page
+  function load(reset) {
+    if (reset === undefined) reset = true;
+    if (!CONFIGURED) {
       state.loaded = true; state.error = 'notConfigured';
       renderList();
       return;
     }
-    flushPending();
-    fetchList(3)
+    if (reset) flushPending();
+    var id = ++state.reqId;
+    var offset = reset ? 0 : state.served;
+    state.loading = true;
+    if (!reset) renderList();
+    fetchPage(offset, 3)
       .then(function (d) {
-        state.codes = d.codes || [];
-        // Keep codes still waiting to be sent visible to their owner
-        lsGet('pendingAdds', []).forEach(function (p) {
-          var lc = p.toLowerCase();
-          if (!state.codes.some(function (c) { return c.code.toLowerCase() === lc; })) {
-            state.codes.push({ code: p, added: Date.now(), clicks: 0 });
+        if (id !== state.reqId) return; // a newer search/sort replaced this request
+        var page = d.codes || [];
+        state.served = (reset ? 0 : state.served) + page.length;
+        state.serverTotal = d.total || 0;
+        if (reset) {
+          state.codes = page.slice();
+          // Keep codes still waiting to be sent visible to their owner
+          if (!$('search').value.trim()) {
+            lsGet('pendingAdds', []).forEach(function (p) {
+              var lc = p.toLowerCase();
+              if (!state.codes.some(function (c) { return c.code.toLowerCase() === lc; })) {
+                state.codes.unshift({ code: p, added: Date.now(), clicks: 0 });
+              }
+            });
           }
-        });
+        } else {
+          var have = {};
+          state.codes.forEach(function (c) { have[c.code.toLowerCase()] = 1; });
+          page.forEach(function (c) { if (!have[c.code.toLowerCase()]) state.codes.push(c); });
+        }
+        state.total = d.total || 0;
+        state.all = d.all || 0;
         state.featured = d.featured || null;
-        state.loaded = true; state.error = null;
+        state.loaded = true; state.error = null; state.loading = false;
         setupPinned('featured', state.featured);
         renderList();
       })
       .catch(function () {
-        if (state.loaded && !state.error) return; // keep showing the last good list
+        if (id !== state.reqId) return;
+        state.loading = false;
+        if (state.loaded && !state.error) { renderList(); return; } // keep showing the last good list
         state.loaded = true; state.error = 'loadErr';
         renderList();
       });
   }
 
-  function hash(str) {
-    var h = 2166136261;
-    for (var i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
-    return h >>> 0;
+  // Server already sorted; just move codes this visitor opened to the end of what's loaded
+  function sorted() {
+    var owner = CFG.OWNER_CODE.toLowerCase();
+    var list = state.codes.filter(function (c) { return c.code.toLowerCase() !== owner; });
+    return list
+      .map(function (c, i) { return { c: c, i: i, u: usedSet[c.code] ? 1 : 0 }; })
+      .sort(function (a, b) { return (a.u - b.u) || (a.i - b.i); })
+      .map(function (x) { return x.c; });
   }
 
-  function sorted() {
-    var q = $('search').value.trim().toLowerCase();
-    var mode = $('sort').value;
-    var owner = CFG.OWNER_CODE.toLowerCase();
-    var list = state.codes.filter(function (c) {
-      var lc = c.code.toLowerCase();
-      return lc !== owner && (!q || lc.indexOf(q) !== -1);
-    });
-    if (mode === 'newest') {
-      list.sort(function (a, b) { return b.added - a.added; });
-    } else if (mode === 'random') {
-      var s = String(state.shuffleSeed);
-      list.sort(function (a, b) { return hash(a.code + s) - hash(b.code + s); });
-    } else {
-      list.sort(function (a, b) { return (a.clicks - b.clicks) || (b.added - a.added); });
-    }
-    // Codes this visitor already opened go to the end
-    list.sort(function (a, b) { return (usedSet[a.code] ? 1 : 0) - (usedSet[b.code] ? 1 : 0); });
-    return list;
+  function addLocal(code) {
+    state.codes.unshift({ code: code, added: Date.now(), clicks: 0 });
+    state.total++; state.all++;
   }
 
   function renderList() {
@@ -341,12 +374,11 @@
     if (state.error) { msg.textContent = t(state.error); more.hidden = true; $('count').textContent = ''; return; }
 
     var list = sorted();
-    var total = state.codes.filter(function (c) { return c.code.toLowerCase() !== CFG.OWNER_CODE.toLowerCase(); }).length;
-    $('count').textContent = total;
-    msg.textContent = list.length ? '' : (total ? t('noMatch') : t('empty'));
+    $('count').textContent = state.all;
+    msg.textContent = list.length ? '' : (state.all ? t('noMatch') : t('empty'));
 
     var frag = document.createDocumentFragment();
-    list.slice(0, state.shown).forEach(function (c) {
+    list.forEach(function (c) {
       var item = document.createElement('div');
       item.className = 'item' + (usedSet[c.code] ? ' used' : '');
 
@@ -380,7 +412,8 @@
       frag.appendChild(item);
     });
     box.appendChild(frag);
-    more.hidden = list.length <= state.shown;
+    more.hidden = state.served >= state.serverTotal;
+    more.disabled = state.loading;
   }
 
   // ---------- add code ----------
@@ -394,7 +427,7 @@
     e.preventDefault();
     var code = normalize($('codeInput').value);
     if (!code) { setMsg(t('invalid'), 'err'); return; }
-    if (!CFG.API_URL) { setMsg(t('notConfigured'), 'err'); return; }
+    if (!CONFIGURED) { setMsg(t('notConfigured'), 'err'); return; }
 
     var lc = code.toLowerCase();
     var already = state.codes.some(function (c) { return c.code.toLowerCase() === lc; });
@@ -403,16 +436,17 @@
     if (already) { setMsg(t('exists'), 'ok'); return; }
 
     // Optimistic: show it immediately, roll back only if the server refuses
-    var entry = { code: code, added: Date.now(), clicks: 0 };
-    state.codes.push(entry);
+    addLocal(code);
+    var entry = state.codes[0];
     renderList();
     setMsg(t('added'), 'ok');
 
     postRetry({ action: 'add', code: code }, 5, function () { setMsg(t('retrying')); })
       .then(function (d) {
-        if (d.ok) { setMsg(t('added'), 'ok'); return; }
+        if (d.ok) { setMsg(t(d.status === 'exists' ? 'exists' : 'added'), 'ok'); return; }
         // invalid (server-side)
         state.codes = state.codes.filter(function (c) { return c !== entry; });
+        state.total--; state.all--;
         renderList();
         $('codeInput').value = code;
         setMsg(t('invalid'), 'err');
@@ -454,7 +488,7 @@
     e.preventDefault();
     var codes = extractCodes($('bulkInput').value);
     if (!codes.length) { setBulkMsg(t('bulkNone'), 'err'); return; }
-    if (!CFG.API_URL) { setBulkMsg(t('notConfigured'), 'err'); return; }
+    if (!CONFIGURED) { setBulkMsg(t('notConfigured'), 'err'); return; }
 
     var known = {};
     state.codes.forEach(function (c) { known[c.code.toLowerCase()] = 1; });
@@ -462,9 +496,7 @@
     var existsLocal = codes.length - fresh.length;
 
     // Optimistic: show them in the list right away
-    fresh.forEach(function (c) {
-      state.codes.push({ code: c, added: Date.now(), clicks: 0 });
-    });
+    fresh.forEach(addLocal);
     renderList();
 
     var btn = $('bulkBtn');
@@ -480,7 +512,6 @@
       return postRetry({ action: 'addMany', codes: batch }, 5, function () { setBulkMsg(t('retrying')); })
         .then(function (d) {
           if (d.ok) { added += d.added || 0; exists += d.exists || 0; }
-          else if (d.error === 'unknown_action') { queued = queued.concat(batch); } // old backend: send one by one later
           else { queued = queued.concat(batch); }
         }, function () { queued = queued.concat(batch); })
         .then(function () { done += batch.length; return next(); });
@@ -525,9 +556,13 @@
     setupPinned('featured', state.featured);
     setMsg('');
   });
-  $('search').addEventListener('input', function () { state.shown = PAGE_SIZE; renderList(); });
-  $('sort').addEventListener('change', function () { state.shown = PAGE_SIZE; state.shuffleSeed = Math.random(); renderList(); });
-  $('moreBtn').addEventListener('click', function () { state.shown += PAGE_SIZE; renderList(); });
+  var searchTimer;
+  $('search').addEventListener('input', function () {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(function () { load(true); }, 350);
+  });
+  $('sort').addEventListener('change', function () { state.seed = String(Math.random()); load(true); });
+  $('moreBtn').addEventListener('click', function () { load(false); });
 
   applyLang();
   setupPinned('owner', CFG.OWNER_CODE);
