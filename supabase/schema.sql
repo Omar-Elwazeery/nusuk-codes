@@ -15,6 +15,30 @@ create unique index if not exists codes_code_lower_idx on public.codes (lower(co
 create index if not exists codes_clicks_idx on public.codes (clicks, added desc);
 create index if not exists codes_added_idx  on public.codes (added desc);
 
+-- Hashed visitor IP (never the raw IP), used only for the per-person limit
+alter table public.codes add column if not exists ip_hash text;
+create index if not exists codes_ip_added_idx on public.codes (ip_hash, added);
+
+
+-- Hashed IP of the current API caller (null if unavailable)
+create or replace function public.caller_ip_hash()
+returns text language plpgsql stable as $$
+declare h json; ip text;
+begin
+  begin
+    h := current_setting('request.headers', true)::json;
+  exception when others then
+    return null;
+  end;
+  ip := coalesce(
+    nullif(h->>'cf-connecting-ip', ''),
+    nullif(trim(split_part(coalesce(h->>'x-forwarded-for', ''), ',', 1)), ''),
+    nullif(h->>'x-real-ip', '')
+  );
+  if ip is null then return null; end if;
+  return md5('nusuk-codes:' || ip);
+end $$;
+
 -- Nobody touches the table directly; everything goes through the functions below.
 alter table public.codes enable row level security;
 revoke all on public.codes from anon, authenticated;
@@ -38,6 +62,8 @@ declare
   v_clean  text[];
   v_added  int;
   v_recent int;
+  v_ip     text := public.caller_ip_hash();
+  v_mine   int;
 begin
   select coalesce(array_agg(c), '{}') into v_clean
   from (
@@ -50,14 +76,23 @@ begin
     return json_build_object('ok', false, 'error', 'invalid');
   end if;
 
-  -- simple global anti-spam limit: 300 new codes per minute
-  select count(*) into v_recent from codes where added > now() - interval '1 minute';
-  if v_recent + cardinality(v_clean) > 300 then
-    return json_build_object('ok', false, 'error', 'rate_limited');
+  -- per-person limit: 100 new codes per 10 minutes
+  if v_ip is not null then
+    select count(*) into v_mine from codes
+    where ip_hash = v_ip and added > now() - interval '10 minutes';
+    if v_mine + cardinality(v_clean) > 100 then
+      return json_build_object('ok', false, 'error', 'rate_limited');
+    end if;
   end if;
 
-  insert into codes (code)
-  select unnest(v_clean)
+  -- global safety net: 1000 new codes per minute from everyone together
+  select count(*) into v_recent from codes where added > now() - interval '1 minute';
+  if v_recent + cardinality(v_clean) > 1000 then
+    return json_build_object('ok', false, 'error', 'busy');
+  end if;
+
+  insert into codes (code, ip_hash)
+  select unnest(v_clean), v_ip
   on conflict ((lower(code))) do nothing;
   get diagnostics v_added = row_count;
 

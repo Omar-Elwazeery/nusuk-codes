@@ -40,6 +40,12 @@
       added: 'تمت إضافة كودك بنجاح 🎉',
       exists: 'هذا الكود موجود مسبقاً ✓',
       busy: 'الخادم مشغول، حاول بعد دقيقة.',
+      rateLimited: 'أضفت أكواداً كثيرة خلال وقت قصير. حاول مرة أخرى بعد 10 دقائق.',
+      shareWa: 'شارك على واتساب',
+      shareLink: 'مشاركة الرابط',
+      linkCopied: 'تم نسخ رابط الموقع ✓',
+      shareText: '🕋 تحدي نسك: فرصة للفوز بعمرة مجانية!\nاستخدم أكواد الآخرين وأضف كودك ليحصل الجميع على مفاتيح إضافية:',
+      bulkLimited: 'تمت إضافة {added}. وصلت للحد المسموح، بقي {left} كود في المربع — أعد المحاولة بعد 10 دقائق.',
       sending: 'جارٍ الإضافة…',
       retrying: 'الخادم مشغول، جارٍ إعادة المحاولة تلقائياً…',
       bulkTitle: 'إضافة عدة أكواد دفعة واحدة',
@@ -88,6 +94,12 @@
       added: 'Your code was added 🎉',
       exists: 'This code is already listed ✓',
       busy: 'Server is busy, try again in a minute.',
+      rateLimited: 'You added a lot of codes in a short time. Please try again in 10 minutes.',
+      shareWa: 'Share on WhatsApp',
+      shareLink: 'Share link',
+      linkCopied: 'Site link copied ✓',
+      shareText: '🕋 Nusuk Challenge: a chance to win a free Umrah!\nUse other people\'s codes and add yours so everyone gets extra keys:',
+      bulkLimited: '{added} added. You reached the limit; {left} codes are left in the box. Try again in 10 minutes.',
       sending: 'Adding…',
       retrying: 'Server busy, retrying automatically…',
       bulkTitle: 'Add many codes at once',
@@ -119,8 +131,11 @@
       el.textContent = t(el.getAttribute('data-i18n'));
     });
     $('langBtn').textContent = t('lang');
+    $('shareWa').href = 'https://wa.me/?text=' + encodeURIComponent(t('shareText') + '\n' + SITE_URL);
     renderList();
   }
+
+  var SITE_URL = 'https://omar-elwazeery.github.io/nusuk-codes/';
 
   // ---------- helpers ----------
   function $(id) { return document.getElementById(id); }
@@ -145,8 +160,8 @@
     toastTimer = setTimeout(function () { el.classList.remove('show'); }, 1800);
   }
 
-  function copy(code) {
-    var done = function () { toast(t('copied')); };
+  function copy(code, msgKey) {
+    var done = function () { toast(t(msgKey || 'copied')); };
     if (navigator.clipboard && window.isSecureContext) {
       navigator.clipboard.writeText(code).then(done, fallback);
     } else { fallback(); }
@@ -200,7 +215,7 @@
     var attempt = 0;
     function go() {
       return post(body).then(function (d) {
-        if (d && (d.ok || d.error === 'invalid' || d.error === 'unknown_action')) return d;
+        if (d && (d.ok || d.error === 'invalid' || d.error === 'rate_limited' || d.error === 'unknown_action')) return d;
         throw d || {};
       }).catch(function (err) {
         attempt++;
@@ -221,7 +236,8 @@
     var pending = lsGet('pendingAdds', []);
     if (!pending.length) return;
     var code = pending[0];
-    postRetry({ action: 'add', code: code }, 3).then(function () {
+    postRetry({ action: 'add', code: code }, 3).then(function (d) {
+      if (d && d.error === 'rate_limited') return; // keep it, try on a later visit
       lsSet('pendingAdds', lsGet('pendingAdds', []).filter(function (c) { return c !== code; }));
       flushPending();
     }, function () { /* try again on next refresh */ });
@@ -444,12 +460,12 @@
     postRetry({ action: 'add', code: code }, 5, function () { setMsg(t('retrying')); })
       .then(function (d) {
         if (d.ok) { setMsg(t(d.status === 'exists' ? 'exists' : 'added'), 'ok'); return; }
-        // invalid (server-side)
+        // refused (invalid or too many from this person)
         state.codes = state.codes.filter(function (c) { return c !== entry; });
         state.total--; state.all--;
         renderList();
         $('codeInput').value = code;
-        setMsg(t('invalid'), 'err');
+        setMsg(t(d.error === 'rate_limited' ? 'rateLimited' : 'invalid'), 'err');
       }, function () {
         // Still failing after retries: keep it locally and send it later automatically
         var pending = lsGet('pendingAdds', []);
@@ -501,7 +517,7 @@
 
     var btn = $('bulkBtn');
     btn.disabled = true;
-    var added = 0, exists = existsLocal, queued = [], done = 0;
+    var added = 0, exists = existsLocal, queued = [], limited = [], done = 0;
     var batches = [];
     for (var i = 0; i < fresh.length; i += 50) batches.push(fresh.slice(i, i + 50));
 
@@ -512,6 +528,11 @@
       return postRetry({ action: 'addMany', codes: batch }, 5, function () { setBulkMsg(t('retrying')); })
         .then(function (d) {
           if (d.ok) { added += d.added || 0; exists += d.exists || 0; }
+          else if (d.error === 'rate_limited') {
+            // Stop here: give the rest back to the person to try later
+            limited = batch.concat.apply(batch, batches);
+            batches = [];
+          }
           else { queued = queued.concat(batch); }
         }, function () { queued = queued.concat(batch); })
         .then(function () { done += batch.length; return next(); });
@@ -519,7 +540,17 @@
 
     function finish() {
       btn.disabled = false;
-      if (queued.length) {
+      if (limited.length) {
+        var lim = {};
+        limited.forEach(function (c) { lim[c.toLowerCase()] = 1; });
+        var before = state.codes.length;
+        state.codes = state.codes.filter(function (c) { return !lim[c.code.toLowerCase()]; });
+        state.total -= before - state.codes.length; state.all -= before - state.codes.length;
+        renderList();
+        $('bulkInput').value = limited.join('\n');
+        $('bulkCount').textContent = fmt('bulkFound', { n: limited.length });
+        setBulkMsg(fmt('bulkLimited', { added: added, left: limited.length }), 'err');
+      } else if (queued.length) {
         var pending = lsGet('pendingAdds', []);
         queued.forEach(function (c) { if (pending.indexOf(c) === -1) pending.push(c); });
         lsSet('pendingAdds', pending);
@@ -556,6 +587,14 @@
     setupPinned('featured', state.featured);
     setMsg('');
   });
+  $('shareBtn').addEventListener('click', function () {
+    if (navigator.share) {
+      navigator.share({ title: t('brand'), text: t('shareText'), url: SITE_URL }).catch(function () {});
+    } else {
+      copy(SITE_URL, 'linkCopied');
+    }
+  });
+
   var searchTimer;
   $('search').addEventListener('input', function () {
     clearTimeout(searchTimer);

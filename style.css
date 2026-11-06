@@ -59,6 +59,11 @@ body {
 .steps li { display: flex; gap: 10px; align-items: center; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; font-size: .93rem; }
 .steps b { flex: none; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; background: var(--green); color: #fff; font-size: .85rem; }
 
+/* Share */
+.share { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.btn-wa { background: #1fa855; color: #fff; }
+.btn-wa:hover { background: #18924a; }
+
 /* Sections */
 section { margin-top: 32px; }
 .sec-title { font-size: 1.15rem; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
