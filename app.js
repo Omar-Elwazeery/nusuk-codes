@@ -42,6 +42,14 @@
       busy: 'الخادم مشغول، حاول بعد دقيقة.',
       sending: 'جارٍ الإضافة…',
       retrying: 'الخادم مشغول، جارٍ إعادة المحاولة تلقائياً…',
+      bulkTitle: 'إضافة عدة أكواد دفعة واحدة',
+      bulkHint: 'الصق أي نص يحتوي على أكواد (كود في كل سطر، أو رسائل وروابط المشاركة). سيتم استخراج كل الأكواد تلقائياً.',
+      bulkBtn: 'إضافة الكل',
+      bulkFound: 'تم العثور على {n} كود',
+      bulkNone: 'لم يتم العثور على أي كود يبدأ بـ NG-',
+      bulkProgress: 'جارٍ الإضافة… {done} / {total}',
+      bulkDone: 'تمت إضافة {added} كود جديد، و{exists} موجود مسبقاً ✓',
+      bulkQueued: 'تمت إضافة {added}، و{queued} محفوظة وستُرسل تلقائياً لاحقاً',
       queued: 'تم حفظ كودك وسيُرسل تلقائياً خلال دقائق ✓',
       noFeatured: 'لا يوجد',
       uses: 'استخدام',
@@ -82,6 +90,14 @@
       busy: 'Server is busy, try again in a minute.',
       sending: 'Adding…',
       retrying: 'Server busy, retrying automatically…',
+      bulkTitle: 'Add many codes at once',
+      bulkHint: 'Paste any text containing codes (one per line, or share messages and links). All codes are extracted automatically.',
+      bulkBtn: 'Add all',
+      bulkFound: '{n} codes found',
+      bulkNone: 'No codes starting with NG- were found',
+      bulkProgress: 'Adding… {done} / {total}',
+      bulkDone: '{added} new codes added, {exists} already listed ✓',
+      bulkQueued: '{added} added, {queued} saved and will be sent automatically later',
       queued: 'Your code is saved and will be sent automatically in a few minutes ✓',
       noFeatured: 'None',
       uses: 'uses',
@@ -168,7 +184,7 @@
     var attempt = 0;
     function go() {
       return post(body).then(function (d) {
-        if (d && (d.ok || d.error === 'invalid')) return d;
+        if (d && (d.ok || d.error === 'invalid' || d.error === 'unknown_action')) return d;
         throw d || {};
       }).catch(function (err) {
         attempt++;
@@ -407,6 +423,86 @@
         lsSet('pendingAdds', pending);
         setMsg(t('queued'), 'ok');
       });
+  });
+
+  // ---------- bulk add ----------
+  function fmt(key, vals) {
+    return t(key).replace(/\{(\w+)\}/g, function (_, k) { return vals[k]; });
+  }
+
+  function extractCodes(text) {
+    var seen = {}, out = [];
+    (String(text).match(/NG-[A-Za-z0-9]+/gi) || []).forEach(function (m) {
+      var c = normalize(m);
+      if (c && !seen[c.toLowerCase()]) { seen[c.toLowerCase()] = 1; out.push(c); }
+    });
+    return out;
+  }
+
+  function setBulkMsg(text, cls) {
+    var m = $('bulkMsg');
+    m.textContent = text;
+    m.className = 'msg' + (cls ? ' ' + cls : '');
+  }
+
+  $('bulkInput').addEventListener('input', function () {
+    var n = extractCodes(this.value).length;
+    $('bulkCount').textContent = this.value.trim() ? fmt('bulkFound', { n: n }) : '';
+  });
+
+  $('bulkForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var codes = extractCodes($('bulkInput').value);
+    if (!codes.length) { setBulkMsg(t('bulkNone'), 'err'); return; }
+    if (!CFG.API_URL) { setBulkMsg(t('notConfigured'), 'err'); return; }
+
+    var known = {};
+    state.codes.forEach(function (c) { known[c.code.toLowerCase()] = 1; });
+    var fresh = codes.filter(function (c) { return !known[c.toLowerCase()]; });
+    var existsLocal = codes.length - fresh.length;
+
+    // Optimistic: show them in the list right away
+    fresh.forEach(function (c) {
+      state.codes.push({ code: c, added: Date.now(), clicks: 0 });
+    });
+    renderList();
+
+    var btn = $('bulkBtn');
+    btn.disabled = true;
+    var added = 0, exists = existsLocal, queued = [], done = 0;
+    var batches = [];
+    for (var i = 0; i < fresh.length; i += 50) batches.push(fresh.slice(i, i + 50));
+
+    function next() {
+      if (!batches.length) return finish();
+      var batch = batches.shift();
+      setBulkMsg(fmt('bulkProgress', { done: done, total: fresh.length }));
+      return postRetry({ action: 'addMany', codes: batch }, 5, function () { setBulkMsg(t('retrying')); })
+        .then(function (d) {
+          if (d.ok) { added += d.added || 0; exists += d.exists || 0; }
+          else if (d.error === 'unknown_action') { queued = queued.concat(batch); } // old backend: send one by one later
+          else { queued = queued.concat(batch); }
+        }, function () { queued = queued.concat(batch); })
+        .then(function () { done += batch.length; return next(); });
+    }
+
+    function finish() {
+      btn.disabled = false;
+      if (queued.length) {
+        var pending = lsGet('pendingAdds', []);
+        queued.forEach(function (c) { if (pending.indexOf(c) === -1) pending.push(c); });
+        lsSet('pendingAdds', pending);
+        flushPending();
+        setBulkMsg(fmt('bulkQueued', { added: added, queued: queued.length }), 'ok');
+      } else {
+        setBulkMsg(fmt('bulkDone', { added: added, exists: exists }), 'ok');
+        $('bulkInput').value = '';
+        $('bulkCount').textContent = '';
+      }
+    }
+
+    if (!fresh.length) { btn.disabled = false; setBulkMsg(fmt('bulkDone', { added: 0, exists: exists }), 'ok'); return; }
+    next();
   });
 
   // ---------- countdown for featured rotation ----------

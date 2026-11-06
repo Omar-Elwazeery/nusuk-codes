@@ -17,7 +17,8 @@ var OWNER_CODE = 'NG-Glutro42';      // excluded from the random featured pick
 var SHEET_NAME = 'codes';
 var ROTATE_MS = 30 * 60 * 1000;      // featured code changes every 30 minutes
 var CODE_RE = /^NG-[A-Za-z0-9]{4,24}$/;
-var MAX_ADDS_PER_MIN = 120;          // simple global anti-spam limit
+var MAX_ADDS_PER_MIN = 300;          // simple global anti-spam limit (codes per minute)
+var MAX_BULK = 50;                   // codes per bulk request
 var CACHE_KEY = 'list_v2';
 var CACHE_SECONDS = 60;
 var CHUNK = 90000;                   // CacheService max is 100KB per value
@@ -33,6 +34,7 @@ function doPost(e) {
   var body = {};
   try { body = JSON.parse((e && e.postData && e.postData.contents) || '{}'); } catch (err) {}
   if (body.action === 'add') return json_(addCode_(body.code));
+  if (body.action === 'addMany') return json_(addMany_(body.codes));
   if (body.action === 'clicks') return json_(clicks_(body.codes));
   if (body.action === 'click') return json_(clicks_([body.code])); // old clients
   return json_({ ok: false, error: 'unknown_action' });
@@ -72,6 +74,35 @@ function addCode_(raw) {
   cache.put(rateKey, String(adds + 1), 120);
   cacheClear_();
   return { ok: true, status: 'added' };
+}
+
+// Bulk add: up to MAX_BULK codes per request
+function addMany_(list) {
+  if (!Array.isArray(list)) return { ok: false, error: 'invalid' };
+  var seen = {}, codes = [];
+  list.slice(0, MAX_BULK).forEach(function (raw) {
+    var c = normalize_(raw);
+    if (c && !seen[c.toLowerCase()]) { seen[c.toLowerCase()] = 1; codes.push(c); }
+  });
+  if (!codes.length) return { ok: false, error: 'invalid' };
+
+  var cache = CacheService.getScriptCache();
+  var rateKey = 'adds_' + Math.floor(Date.now() / 60000);
+  var adds = Number(cache.get(rateKey) || 0);
+  if (adds + codes.length > MAX_ADDS_PER_MIN) return { ok: false, error: 'rate_limited' };
+
+  var existing = {};
+  readAll_().forEach(function (r) { existing[r.code.toLowerCase()] = 1; });
+  var fresh = codes.filter(function (c) { return !existing[c.toLowerCase()]; });
+
+  // appendRow is atomic, so this is safe alongside single adds without a lock
+  var sh = sheet_(), now = Date.now();
+  fresh.forEach(function (c, i) { sh.appendRow([c, now + i, 0]); });
+  if (fresh.length) {
+    cache.put(rateKey, String(adds + fresh.length), 120);
+    cacheClear_();
+  }
+  return { ok: true, added: fresh.length, exists: codes.length - fresh.length };
 }
 
 // Batched click counts: one request carries many clicks.

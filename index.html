@@ -67,6 +67,21 @@
       </form>
       <p class="hint" data-i18n="addHint">الصق الكود (يبدأ بـ NG-) أو رابط المشاركة كاملاً من التطبيق.</p>
       <p id="addMsg" class="msg" role="status" aria-live="polite"></p>
+
+      <details class="bulk">
+        <summary data-i18n="bulkTitle">إضافة عدة أكواد دفعة واحدة</summary>
+        <form id="bulkForm" class="bulk-form" novalidate>
+          <textarea id="bulkInput" dir="ltr" rows="6" spellcheck="false"
+                    placeholder="NG-XXXXXXXX&#10;NG-YYYYYYYY&#10;https://services.nusuk.sa/app?p=27&amp;id=NG-ZZZZZZZZ"
+                    aria-label="Codes"></textarea>
+          <p class="hint" data-i18n="bulkHint">الصق أي نص يحتوي على أكواد (كود في كل سطر، أو رسائل وروابط المشاركة). سيتم استخراج كل الأكواد تلقائياً.</p>
+          <div class="bulk-row">
+            <span id="bulkCount" class="hint"></span>
+            <button class="btn btn-primary" type="submit" id="bulkBtn" data-i18n="bulkBtn">إضافة الكل</button>
+          </div>
+          <p id="bulkMsg" class="msg" role="status" aria-live="polite"></p>
+        </form>
+      </details>
     </section>
 
     <section class="list" aria-labelledby="listTitle">
