@@ -68,38 +68,42 @@ function addCode_(raw) {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) return { ok: false, error: 'busy' };
   try {
-    var rows = readAll_();
-    var lc = code.toLowerCase();
-    for (var i = 0; i < rows.length; i++) {
-      if (rows[i].code.toLowerCase() === lc) return { ok: true, status: 'exists' };
-    }
-    sheet_().appendRow([code, Date.now(), 0]);
+    var sh = sheet_();
+    if (findRow_(sh, code)) return { ok: true, status: 'exists' };
+    var now = Date.now();
+    sh.appendRow([code, now, 0]);
     cache.put(rateKey, String(adds + 1), 120);
-    cache.remove(CACHE_KEY);
+    // Update the cached list in place so the next "list" stays fast
+    var cached = cache.get(CACHE_KEY);
+    if (cached) {
+      var list = JSON.parse(cached);
+      list.push({ code: code, added: now, clicks: 0 });
+      try { cache.put(CACHE_KEY, JSON.stringify(list), CACHE_SECONDS); } catch (err) { cache.remove(CACHE_KEY); }
+    }
     return { ok: true, status: 'added' };
   } finally {
     lock.releaseLock();
   }
 }
 
+// No lock: a rare lost increment is fine, and it never blocks people adding codes
 function click_(raw) {
   var code = normalize_(raw);
   if (!code) return { ok: false, error: 'invalid' };
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(5000)) return { ok: false, error: 'busy' };
-  try {
-    var rows = readAll_();
-    var lc = code.toLowerCase();
-    for (var i = 0; i < rows.length; i++) {
-      if (rows[i].code.toLowerCase() === lc) {
-        sheet_().getRange(rows[i].row, 3).setValue(rows[i].clicks + 1);
-        return { ok: true };
-      }
-    }
-    return { ok: false, error: 'not_found' };
-  } finally {
-    lock.releaseLock();
-  }
+  var sh = sheet_();
+  var row = findRow_(sh, code);
+  if (!row) return { ok: false, error: 'not_found' };
+  var cell = sh.getRange(row, 3);
+  cell.setValue((Number(cell.getValue()) || 0) + 1);
+  return { ok: true };
+}
+
+// Fast exact lookup in column A (case-insensitive), returns row number or 0
+function findRow_(sh, code) {
+  var last = sh.getLastRow();
+  if (last < 2) return 0;
+  var hit = sh.getRange(2, 1, last - 1, 1).createTextFinder(code).matchEntireCell(true).matchCase(false).findNext();
+  return hit ? hit.getRow() : 0;
 }
 
 // ---------- helpers ----------

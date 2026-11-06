@@ -288,9 +288,19 @@
     var code = normalize($('codeInput').value);
     if (!code) { setMsg(t('invalid'), 'err'); return; }
     if (!CFG.API_URL) { setMsg(t('notConfigured'), 'err'); return; }
-    var btn = $('addBtn');
-    btn.disabled = true;
-    setMsg(t('sending'));
+
+    var lc = code.toLowerCase();
+    var already = state.codes.some(function (c) { return c.code.toLowerCase() === lc; });
+    $('codeInput').value = '';
+    markUsed(code); // don't show your own code to yourself first
+    if (already) { setMsg(t('exists'), 'ok'); return; }
+
+    // Optimistic: show it immediately, roll back only if the server refuses
+    var entry = { code: code, added: Date.now(), clicks: 0 };
+    state.codes.push(entry);
+    renderList();
+    setMsg(t('added'), 'ok');
+
     fetch(CFG.API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -298,19 +308,17 @@
     })
       .then(function (r) { return r.json(); })
       .then(function (d) {
-        if (d && d.ok) {
-          setMsg(t(d.status === 'exists' ? 'exists' : 'added'), 'ok');
-          $('codeInput').value = '';
-          markUsed(code); // don't show your own code to yourself first
-          load();
-        } else if (d && d.error === 'invalid') {
-          setMsg(t('invalid'), 'err');
-        } else {
-          setMsg(t('busy'), 'err');
-        }
+        if (d && d.ok) return;
+        rollback(d && d.error === 'invalid' ? 'invalid' : 'busy');
       })
-      .catch(function () { setMsg(t('busy'), 'err'); })
-      .then(function () { btn.disabled = false; });
+      .catch(function () { rollback('busy'); });
+
+    function rollback(errKey) {
+      state.codes = state.codes.filter(function (c) { return c !== entry; });
+      renderList();
+      $('codeInput').value = code;
+      setMsg(t(errKey), 'err');
+    }
   });
 
   // ---------- countdown for featured rotation ----------
