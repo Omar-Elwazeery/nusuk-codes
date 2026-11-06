@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>أكواد تحدي نسك</title>
+  <meta name="description" content="شارك كودك في تحدي نسك واستخدم أكواد الآخرين لتحصلوا جميعاً على مفاتيح إضافية للفوز بعمرة مجانية.">
+  <meta name="theme-color" content="#0f4c3a">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🕋</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap top-inner">
+      <div class="brand">
+        <span class="brand-icon" aria-hidden="true">🕋</span>
+        <span data-i18n="brand">أكواد تحدي نسك</span>
+      </div>
+      <button id="langBtn" class="lang-btn" type="button" aria-label="Switch language">English</button>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="hero">
+      <h1 data-i18n="heroTitle">تبادل الأكواد واربح مفاتيح أكثر</h1>
+      <p data-i18n="heroText">في تحدي نسك تحصل على مفتاح مجاني كل يوم لتجيب على سؤال. عندما تستخدم كود شخص آخر تحصل أنت وهو على مفتاح إضافي.</p>
+      <ol class="steps">
+        <li><b>1</b><span data-i18n="step1">اضغط "افتح في نسك" على أي كود</span></li>
+        <li><b>2</b><span data-i18n="step2">سجّل أو ادخل في التطبيق لتحصل على المفتاح</span></li>
+        <li><b>3</b><span data-i18n="step3">أضف كودك بالأسفل ليستخدمه الآخرون</span></li>
+      </ol>
+    </section>
+
+    <section class="pinned" aria-labelledby="pinnedTitle">
+      <h2 id="pinnedTitle" class="sec-title" data-i18n="pinned">📌 أكواد مثبتة</h2>
+      <div class="pinned-grid">
+        <article class="card card-owner">
+          <div class="badge" data-i18n="ownerBadge">كود صاحب الموقع</div>
+          <div class="code" id="ownerCode"></div>
+          <div class="actions">
+            <a class="btn btn-primary" id="ownerOpen" target="_blank" rel="noopener" data-i18n="open">افتح في نسك</a>
+            <button class="btn btn-ghost" type="button" id="ownerCopy" data-i18n="copy">نسخ</button>
+          </div>
+        </article>
+
+        <article class="card card-featured">
+          <div class="badge badge-gold" data-i18n="featuredBadge">كود مميز عشوائي</div>
+          <div class="code" id="featuredCode">—</div>
+          <div class="countdown"><span data-i18n="changesIn">يتغير بعد</span> <span id="countdown" dir="ltr">--:--</span></div>
+          <div class="actions">
+            <a class="btn btn-primary" id="featuredOpen" target="_blank" rel="noopener" data-i18n="open">افتح في نسك</a>
+            <button class="btn btn-ghost" type="button" id="featuredCopy" data-i18n="copy">نسخ</button>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="add" aria-labelledby="addTitle">
+      <h2 id="addTitle" class="sec-title" data-i18n="addTitle">أضف كودك</h2>
+      <form id="addForm" class="add-form" novalidate>
+        <input id="codeInput" type="text" dir="ltr" autocomplete="off" spellcheck="false"
+               placeholder="NG-XXXXXXXX" aria-label="Code">
+        <button class="btn btn-primary" type="submit" id="addBtn" data-i18n="addBtn">إضافة</button>
+      </form>
+      <p class="hint" data-i18n="addHint">الصق الكود (يبدأ بـ NG-) أو رابط المشاركة كاملاً من التطبيق.</p>
+      <p id="addMsg" class="msg" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="list" aria-labelledby="listTitle">
+      <div class="list-head">
+        <h2 id="listTitle" class="sec-title"><span data-i18n="allCodes">كل الأكواد</span> <span id="count" class="count"></span></h2>
+        <div class="list-tools">
+          <input id="search" type="search" dir="ltr" placeholder="Search / بحث" aria-label="Search">
+          <select id="sort" aria-label="Sort">
+            <option value="least" data-i18n="sortLeast">الأقل استخداماً</option>
+            <option value="newest" data-i18n="sortNewest">الأحدث</option>
+            <option value="random" data-i18n="sortRandom">عشوائي</option>
+          </select>
+        </div>
+      </div>
+      <div id="codes" class="codes"></div>
+      <p id="listMsg" class="msg center"></p>
+      <button id="moreBtn" class="btn btn-ghost more" type="button" hidden data-i18n="more">عرض المزيد</button>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <div class="wrap">
+      <p data-i18n="disclaimer">هذا موقع مجتمعي غير رسمي ولا يتبع لتطبيق نسك أو وزارة الحج والعمرة.</p>
+    </div>
+  </footer>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
